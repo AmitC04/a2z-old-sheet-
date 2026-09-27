@@ -1,12 +1,14 @@
-name: Deploy to GitHub Pages
+name: Deploy A2Z Sheet to GitHub Pages
 
 on:
   push:
     branches: ["main"]
+    paths-ignore:
+      - "downloads/**"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -20,17 +22,111 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build updated A2Z site from source data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf a2z_old_sheet-main _upstream.zip
+          mkdir -p downloads
+
+          curl -L --fail --silent --show-error \
+            -o _upstream.zip \
+            https://github.com/Bugaddr/a2z_old_sheet/archive/refs/heads/main.zip
+
+          unzip -q _upstream.zip
+          rm -f _upstream.zip
+
+          python - <<'PY'
+          import json, re, unicodedata
+          from pathlib import Path
+
+          root = Path("a2z_old_sheet-main")
+          data_file = root / "a2z.json"
+
+          data = json.loads(data_file.read_text(encoding="utf-8"))
+
+          def slug(title):
+              s = unicodedata.normalize("NFKD", str(title or ""))
+              s = "".join(ch for ch in s if not unicodedata.combining(ch))
+              s = s.replace("&", " and ")
+              s = re.sub(r"['’]", "", s)
+              s = re.sub(r"\([^)]*\)", " ", s)
+              s = re.sub(r"\[[^]]*\]", " ", s)
+              s = s.lower()
+              s = re.sub(r"[^a-z0-9]+", "-", s)
+              return s.strip("-")
+
+          total = 0
+          updated = 0
+          blank = 0
+
+          for step in data:
+              for sub in step.get("sub_steps", []):
+                  for topic in sub.get("topics", []):
+                      total += 1
+                      if topic.get("question_title") and topic.get("post_link"):
+                          topic["post_link"] = (
+                              "https://takeuforward.org/practice/dsa/"
+                              + slug(topic["question_title"])
+                          )
+                          updated += 1
+                      else:
+                          blank += 1
+
+          data_file.write_text(
+              json.dumps(data, ensure_ascii=False, indent=4) + "\n",
+              encoding="utf-8"
+          )
+
+          report = {
+              "total_topics": total,
+              "updated_blog_links": updated,
+              "left_blank": blank,
+              "source": "Bugaddr/a2z_old_sheet",
+              "target": "https://takeuforward.org/prep-hub/strivers-a2z-dsa-sheet?page=sheet",
+              "mapping": "Existing non-empty post_link values remapped by question_title to TakeUForward practice/dsa slugs."
+          }
+
+          (root / "link_update_report.json").write_text(
+              json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8"
+          )
+          print(f"Updated {updated}/{total} topics; left {blank} entries blank.")
+          PY
+
+          # Package the same folder structure and updated dataset for download.
+          rm -f downloads/a2z_old_sheet-updated-tuf-links.zip
+          zip -q -X -r downloads/a2z_old_sheet-updated-tuf-links.zip a2z_old_sheet-main
+
+      - name: Commit updated ZIP to repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "AmitC04"
+          git config user.email "130222578+AmitC04@users.noreply.github.com"
+          git add downloads/a2z_old_sheet-updated-tuf-links.zip
+          if git diff --cached --quiet; then
+            echo "ZIP is already up to date."
+          else
+            git commit -m "Add updated A2Z sheet ZIP"
+            git push
+          fi
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
-      - name: Upload artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "."
+          path: "a2z_old_sheet-main"
 
       - name: Deploy
         id: deployment
